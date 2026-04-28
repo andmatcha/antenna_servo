@@ -1,12 +1,14 @@
 #include "app.h"
 
 #include "debug_log.h"
+#include "modules/board_led.h"
 #include "modules/gc_packet_receiver.h"
 #include "modules/rssi_monitor.h"
 #include "modules/servo_controller.h"
 
 void init(void)
 {
+    board_led_init();
     servo_controller_init();
     rssi_monitor_init();
     gc_packet_receiver_init();
@@ -19,6 +21,8 @@ void poll(void)
 
     gc_packet_receiver_poll();
     while (gc_packet_receiver_pop(&packet)) {
+        board_led_on_gc_packet_received();
+
         switch (packet.type) {
         case GC_PACKET_TYPE_AUTO:
         case GC_PACKET_TYPE_MANUAL_POSITION:
@@ -56,6 +60,7 @@ void poll(void)
 
     servo_controller_poll();
     rssi_monitor_poll();
+    board_led_poll();
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
