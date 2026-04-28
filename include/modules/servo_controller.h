@@ -1,0 +1,16 @@
+#ifndef ANTENNA_SERVO_SERVO_CONTROLLER_H
+#define ANTENNA_SERVO_SERVO_CONTROLLER_H
+
+#include "stm32f3xx_hal.h"
+
+#include <stdint.h>
+
+void servo_controller_init(void);
+void servo_controller_poll(void);
+void servo_controller_set_position(uint16_t angle_tenths);
+void servo_controller_set_rate(int16_t rate_per_mille);
+void servo_controller_stop(void);
+void servo_controller_home(void);
+void servo_controller_on_feedback_capture(TIM_HandleTypeDef *htim);
+
+#endif /* ANTENNA_SERVO_SERVO_CONTROLLER_H */
