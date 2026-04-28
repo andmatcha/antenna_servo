@@ -1,5 +1,6 @@
 #include "modules/gc_packet_receiver.h"
 
+#include "debug_log.h"
 #include "main.h"
 
 #include <string.h>
@@ -29,6 +30,18 @@ typedef struct
     volatile uint8_t queue_count;
 } GcPacketReceiverContext;
 
+#if DEBUG_LOG_ENABLED
+typedef struct
+{
+    uint32_t crc_errors;
+    uint32_t invalid_packets;
+    uint32_t queue_overwrites;
+    uint32_t uart_errors;
+} GcPacketReceiverDebugCounters;
+
+static volatile GcPacketReceiverDebugCounters g_gc_packet_receiver_debug;
+#endif
+
 static GcPacketReceiverContext g_gc_packet_receiver;
 
 extern UART_HandleTypeDef GC_PACKET_UART;
@@ -46,6 +59,32 @@ static void exit_critical_section(uint32_t primask)
         __enable_irq();
     }
 }
+
+#if DEBUG_LOG_ENABLED
+static void increment_debug_counter(volatile uint32_t *counter)
+{
+    (*counter)++;
+}
+
+static GcPacketReceiverDebugCounters take_debug_counters(void)
+{
+    GcPacketReceiverDebugCounters counters;
+    uint32_t primask = enter_critical_section();
+
+    counters.crc_errors = g_gc_packet_receiver_debug.crc_errors;
+    counters.invalid_packets = g_gc_packet_receiver_debug.invalid_packets;
+    counters.queue_overwrites = g_gc_packet_receiver_debug.queue_overwrites;
+    counters.uart_errors = g_gc_packet_receiver_debug.uart_errors;
+
+    g_gc_packet_receiver_debug.crc_errors = 0U;
+    g_gc_packet_receiver_debug.invalid_packets = 0U;
+    g_gc_packet_receiver_debug.queue_overwrites = 0U;
+    g_gc_packet_receiver_debug.uart_errors = 0U;
+
+    exit_critical_section(primask);
+    return counters;
+}
+#endif
 
 static uint16_t read_u16_le(const uint8_t *data)
 {
@@ -108,6 +147,9 @@ static bool enqueue_packet(const GcPacket *packet)
     uint32_t primask = enter_critical_section();
 
     if (g_gc_packet_receiver.queue_count >= GC_PACKET_QUEUE_DEPTH) {
+#if DEBUG_LOG_ENABLED
+        increment_debug_counter(&g_gc_packet_receiver_debug.queue_overwrites);
+#endif
         g_gc_packet_receiver.queue[g_gc_packet_receiver.queue_tail] = *packet;
         g_gc_packet_receiver.queue_tail =
             (uint8_t)((g_gc_packet_receiver.queue_tail + 1U) %
@@ -133,6 +175,9 @@ static void accept_frame(const uint8_t *frame)
     uint16_t calculated_crc = crc16_ccitt_false(frame, 7U);
 
     if (received_crc != calculated_crc) {
+#if DEBUG_LOG_ENABLED
+        increment_debug_counter(&g_gc_packet_receiver_debug.crc_errors);
+#endif
         return;
     }
 
@@ -142,6 +187,9 @@ static void accept_frame(const uint8_t *frame)
 
     if (!is_known_type(packet.type) ||
         !packet_value_is_valid(packet.type, packet.value)) {
+#if DEBUG_LOG_ENABLED
+        increment_debug_counter(&g_gc_packet_receiver_debug.invalid_packets);
+#endif
         return;
     }
 
@@ -211,6 +259,20 @@ void gc_packet_receiver_init(void)
 
 void gc_packet_receiver_poll(void)
 {
+#if DEBUG_LOG_ENABLED
+    GcPacketReceiverDebugCounters counters = take_debug_counters();
+
+    if ((counters.crc_errors != 0U) ||
+        (counters.invalid_packets != 0U) ||
+        (counters.queue_overwrites != 0U) ||
+        (counters.uart_errors != 0U)) {
+        LOG("[antenna_servo] gc rx diag: crc=%lu invalid=%lu overwrite=%lu uart=%lu\r\n",
+            (unsigned long)counters.crc_errors,
+            (unsigned long)counters.invalid_packets,
+            (unsigned long)counters.queue_overwrites,
+            (unsigned long)counters.uart_errors);
+    }
+#endif
 }
 
 bool gc_packet_receiver_pop(GcPacket *packet)
@@ -252,6 +314,9 @@ void gc_packet_receiver_on_uart_error(UART_HandleTypeDef *huart)
         return;
     }
 
+#if DEBUG_LOG_ENABLED
+    increment_debug_counter(&g_gc_packet_receiver_debug.uart_errors);
+#endif
     g_gc_packet_receiver.rx_state = GC_RX_WAIT_G;
     g_gc_packet_receiver.frame_index = 0U;
     restart_uart_reception();
