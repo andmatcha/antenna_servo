@@ -2,11 +2,13 @@
 
 #include "debug_log.h"
 #include "modules/gc_packet_receiver.h"
+#include "modules/rssi_monitor.h"
 #include "modules/servo_controller.h"
 
 void init(void)
 {
     servo_controller_init();
+    rssi_monitor_init();
     gc_packet_receiver_init();
     LOG("[antenna_servo] init complete\r\n");
 }
@@ -53,6 +55,7 @@ void poll(void)
     }
 
     servo_controller_poll();
+    rssi_monitor_poll();
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -67,5 +70,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
+    rssi_monitor_on_capture(htim);
     servo_controller_on_feedback_capture(htim);
 }
