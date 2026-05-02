@@ -12,7 +12,7 @@ help:
 		'make debug          Build debug firmware with printf logs' \
 		'make upload         Upload release firmware' \
 		'make upload-debug   Upload debug firmware with printf logs' \
-		'make monitor        Show ITM/SWO printf log output'
+		'make monitor        Show USART2/VCP printf log output'
 
 build:
 	$(PIO) run --project-dir $(PROJECT_DIR) -e $(ENV)

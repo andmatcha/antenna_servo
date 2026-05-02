@@ -1,41 +1,27 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-# Show printf output emitted through ITM stimulus port 0.
+# Show printf output emitted on USART2 TX through the ST-LINK VCP.
+# Pass a port as the first argument, or set PORT/BAUD in the environment.
 
-OPENOCD_CMD=(
-  openocd -f interface/stlink.cfg -f target/stm32f3x.cfg \
-    -c "init" \
-    -c "stm32f3x.tpiu configure -protocol uart -traceclk 64000000 -pin-freq 1000000 -output :3344 -formatter off" \
-    -c "itm ports on" \
-    -c "stm32f3x.tpiu enable" \
-    -c "reset run"
-)
+PIO="${PIO:-pio}"
+BAUD="${BAUD:-115200}"
+PORT="${1:-${PORT:-}}"
 
-LOG_FILE="/tmp/openocd_itm_$(date +%Y%m%d_%H%M%S).log"
-
-echo "[run_itm_nc] starting OpenOCD in background... (log: $LOG_FILE)" >&2
-"${OPENOCD_CMD[@]}" >"$LOG_FILE" 2>&1 &
-OPENOCD_PID=$!
-
-cleanup() {
-  if kill -0 "$OPENOCD_PID" 2>/dev/null; then
-    echo "[run_itm_nc] stopping OpenOCD (PID: $OPENOCD_PID)" >&2
-    kill "$OPENOCD_PID" 2>/dev/null || true
-    wait "$OPENOCD_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-echo "[run_itm_nc] waiting for port 3344..." >&2
-for i in {1..100}; do
-  if nc -z localhost 3344 2>/dev/null; then
+if [[ -z "$PORT" ]]; then
+  for candidate in /dev/cu.usbmodem*(N) /dev/tty.usbmodem*(N) /dev/ttyACM*(N); do
+    PORT="$candidate"
     break
-  fi
-  sleep 0.1
-done
+  done
+fi
 
-echo "[run_itm_nc] connected: nc localhost 3344" >&2
-nc localhost 3344
+if [[ -z "$PORT" ]]; then
+  echo "[serial_log] ST-LINK VCP serial port was not found." >&2
+  echo "[serial_log] Available ports:" >&2
+  "$PIO" device list >&2 || true
+  exit 1
+fi
 
-echo "[run_itm_nc] nc finished; cleaning up." >&2
+echo "[serial_log] reading USART2/VCP logs on $PORT at ${BAUD} baud" >&2
+echo "[serial_log] use make upload-debug first so DEBUG_LOG_ENABLED is set" >&2
+"$PIO" device monitor --port "$PORT" --baud "$BAUD" --filter direct

@@ -21,6 +21,7 @@ typedef struct
     uint16_t target_angle_tenths;
     int16_t rate_per_mille;
     int16_t position_speed_limit_per_mille;
+    uint16_t pwm_us;
     ServoMode mode;
 } ServoControllerContext;
 
@@ -65,6 +66,7 @@ static bool feedback_is_fresh(uint32_t now_ms)
 static void set_pwm_us(uint16_t pulse_us)
 {
     pulse_us = clamp_u16(pulse_us, SERVO_PWM_MIN_US, SERVO_PWM_MAX_US);
+    g_servo_controller.pwm_us = pulse_us;
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse_us);
 }
 
@@ -209,6 +211,7 @@ void servo_controller_init(void)
     g_servo_controller.rate_per_mille = 0;
     g_servo_controller.position_speed_limit_per_mille =
         SERVO_POSITION_HOME_SPEED_PER_MILLE;
+    g_servo_controller.pwm_us = SERVO_PWM_NEUTRAL_US;
     g_servo_controller.mode = SERVO_MODE_POSITION;
 
     set_pwm_us(SERVO_PWM_NEUTRAL_US);
@@ -286,6 +289,19 @@ void servo_controller_home(void)
 {
     command_position(SERVO_HOME_ANGLE_TENTHS,
                      SERVO_POSITION_HOME_SPEED_PER_MILLE);
+}
+
+void servo_controller_get_settings(ServoControllerSettings *settings)
+{
+    if (settings == NULL) {
+        return;
+    }
+
+    settings->target_angle_tenths = g_servo_controller.target_angle_tenths;
+    settings->rate_per_mille = g_servo_controller.rate_per_mille;
+    settings->position_speed_limit_per_mille =
+        g_servo_controller.position_speed_limit_per_mille;
+    settings->pwm_us = g_servo_controller.pwm_us;
 }
 
 void servo_controller_on_feedback_capture(TIM_HandleTypeDef *htim)
