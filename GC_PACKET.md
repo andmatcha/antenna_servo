@@ -27,14 +27,14 @@ Types:
 
 | Type | Name | `value` semantics |
 |---:|---|---|
-| `0x01` | `AUTO` | `0..3599`, antenna tracking angle in `0.1 deg` units |
-| `0x02` | `MANUAL_POSITION` | `0..3599`, absolute angle in `0.1 deg` units |
-| `0x03` | `MANUAL_RATE` | `-1000..1000`, rate command where `1000 = +100.0%` |
+| `0x01` | `AUTO` | `0..3599`, antenna tracking angle in `0.1 deg` units; values above `1800` are applied as `1800` |
+| `0x02` | `MANUAL_POSITION` | `0..3599`, absolute angle in `0.1 deg` units; values above `1800` are applied as `1800` |
+| `0x03` | `MANUAL_RATE` | `-1000..1000`, rate command where `1000 = +100.0%`; the controller slews the commanded target angle in software |
 | `0x04` | `STOP` | `0` |
 | `0x05` | `HOME` | `0` |
 
 Servo semantics:
 
 - `AUTO` and `MANUAL_POSITION` carry absolute position commands, not relative deltas.
-- `/antenna` computes a 270-degree servo absolute angle for GNSS tracking and sends it as `AUTO`.
+- `/antenna` may compute a 270-degree servo absolute angle for GNSS tracking and send it as `AUTO`; this controller limits the operational range to `0..1800`.
 - The servo mechanical angle is not a map bearing. Map bearing is only an internal calculation input for `/antenna`.

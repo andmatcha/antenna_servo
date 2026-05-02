@@ -20,6 +20,5 @@ void servo_controller_set_rate(int16_t rate_per_mille);
 void servo_controller_stop(void);
 void servo_controller_home(void);
 void servo_controller_get_settings(ServoControllerSettings *settings);
-void servo_controller_on_feedback_capture(TIM_HandleTypeDef *htim);
 
 #endif /* ANTENNA_SERVO_SERVO_CONTROLLER_H */

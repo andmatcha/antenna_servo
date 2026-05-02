@@ -3,8 +3,7 @@
 #include "main.h"
 #include "modules/servo_config.h"
 
-#include <stdbool.h>
-#include <stdlib.h>
+#define SERVO_RATE_DELTA_DENOMINATOR 1000000LL
 
 typedef enum
 {
@@ -15,20 +14,17 @@ typedef enum
 
 typedef struct
 {
-    volatile uint16_t angle_tenths;
-    volatile uint32_t last_feedback_ms;
-    volatile bool feedback_valid;
     uint16_t target_angle_tenths;
     int16_t rate_per_mille;
     int16_t position_speed_limit_per_mille;
+    int32_t rate_delta_remainder;
+    uint32_t last_rate_update_ms;
     uint16_t pwm_us;
     ServoMode mode;
 } ServoControllerContext;
 
-static ServoControllerContext g_servo_controller;
-
-extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim3;
+static ServoControllerContext g_servo_controller;
 
 static uint16_t clamp_u16(uint16_t value, uint16_t min_value, uint16_t max_value)
 {
@@ -56,13 +52,6 @@ static int16_t clamp_i16(int16_t value, int16_t min_value, int16_t max_value)
     return value;
 }
 
-static bool feedback_is_fresh(uint32_t now_ms)
-{
-    return g_servo_controller.feedback_valid &&
-           ((now_ms - g_servo_controller.last_feedback_ms) <=
-            SERVO_FEEDBACK_STALE_TIMEOUT_MS);
-}
-
 static void set_pwm_us(uint16_t pulse_us)
 {
     pulse_us = clamp_u16(pulse_us, SERVO_PWM_MIN_US, SERVO_PWM_MAX_US);
@@ -70,26 +59,27 @@ static void set_pwm_us(uint16_t pulse_us)
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse_us);
 }
 
-static void drive_stop(void)
+static uint16_t angle_to_pwm_us(uint16_t angle_tenths)
 {
-    set_pwm_us(SERVO_PWM_NEUTRAL_US);
+    uint32_t pwm_span = SERVO_PWM_MAX_US - SERVO_PWM_MIN_US;
+    uint32_t pulse_offset;
+
+    angle_tenths = clamp_u16(angle_tenths,
+                             SERVO_MIN_ANGLE_TENTHS,
+                             SERVO_MAX_ANGLE_TENTHS);
+    pulse_offset =
+        (((uint32_t)angle_tenths * pwm_span) +
+         (SERVO_PHYSICAL_RANGE_TENTHS / 2U)) /
+        SERVO_PHYSICAL_RANGE_TENTHS;
+
+    return clamp_u16((uint16_t)(SERVO_PWM_MIN_US + pulse_offset),
+                     SERVO_PWM_MIN_US,
+                     SERVO_PWM_MAX_US);
 }
 
-static void drive_rate_per_mille(int16_t rate_per_mille)
+static void apply_target_pwm(void)
 {
-    int32_t pulse_us;
-    int32_t offset_us;
-
-    rate_per_mille = clamp_i16(rate_per_mille, -1000, 1000);
-    rate_per_mille = (int16_t)(rate_per_mille * SERVO_CONTROL_DIRECTION);
-
-    offset_us = ((int32_t)SERVO_PWM_FULL_SPEED_OFFSET_US *
-                 (int32_t)rate_per_mille) / 1000;
-    pulse_us = (int32_t)SERVO_PWM_NEUTRAL_US + offset_us;
-
-    set_pwm_us((uint16_t)clamp_i16((int16_t)pulse_us,
-                                   (int16_t)SERVO_PWM_MIN_US,
-                                   (int16_t)SERVO_PWM_MAX_US));
+    set_pwm_us(angle_to_pwm_us(g_servo_controller.target_angle_tenths));
 }
 
 static void command_position(uint16_t angle_tenths, int16_t speed_limit_per_mille)
@@ -101,133 +91,75 @@ static void command_position(uint16_t angle_tenths, int16_t speed_limit_per_mill
     g_servo_controller.position_speed_limit_per_mille =
         clamp_i16(speed_limit_per_mille, 0, 1000);
     g_servo_controller.rate_per_mille = 0;
+    g_servo_controller.rate_delta_remainder = 0;
     g_servo_controller.mode = SERVO_MODE_POSITION;
+    apply_target_pwm();
 }
 
-static uint16_t calculate_feedback_angle(uint32_t period_us, uint32_t high_us)
+static void poll_position_mode(void)
 {
-    uint32_t duty_per_mille;
-    uint32_t angle_tenths;
-    uint32_t duty_span;
-
-    duty_per_mille = ((high_us * 1000U) + (period_us / 2U)) / period_us;
-
-    if (duty_per_mille < SERVO_FEEDBACK_DUTY_MIN_PER_MILLE) {
-        duty_per_mille = SERVO_FEEDBACK_DUTY_MIN_PER_MILLE;
-    } else if (duty_per_mille > SERVO_FEEDBACK_DUTY_MAX_PER_MILLE) {
-        duty_per_mille = SERVO_FEEDBACK_DUTY_MAX_PER_MILLE;
-    }
-
-    duty_span = SERVO_FEEDBACK_DUTY_MAX_PER_MILLE -
-                SERVO_FEEDBACK_DUTY_MIN_PER_MILLE;
-    angle_tenths =
-        ((duty_per_mille - SERVO_FEEDBACK_DUTY_MIN_PER_MILLE) *
-         SERVO_FEEDBACK_FULL_SCALE_TENTHS +
-         (duty_span / 2U)) / duty_span;
-
-    if (angle_tenths >= SERVO_FEEDBACK_FULL_SCALE_TENTHS) {
-        angle_tenths = SERVO_FEEDBACK_FULL_SCALE_TENTHS - 1U;
-    }
-
-#if SERVO_FEEDBACK_INVERTED
-    angle_tenths = (SERVO_FEEDBACK_FULL_SCALE_TENTHS - 1U) - angle_tenths;
-#endif
-
-    return (uint16_t)angle_tenths;
+    apply_target_pwm();
 }
 
-static int16_t calculate_position_command(int16_t error_tenths,
-                                          int16_t speed_limit_per_mille)
+static void update_rate_target(uint32_t now_ms)
 {
-    int16_t command_per_mille;
-    int16_t abs_error = (int16_t)abs(error_tenths);
+    uint32_t elapsed_ms = now_ms - g_servo_controller.last_rate_update_ms;
+    int64_t scaled_delta;
+    int32_t delta_tenths;
+    int32_t target_angle_tenths;
 
-    command_per_mille =
-        (int16_t)(abs_error * SERVO_POSITION_KP_PER_TENTH);
-    command_per_mille =
-        clamp_i16(command_per_mille,
-                  SERVO_POSITION_MIN_COMMAND_PER_MILLE,
-                  speed_limit_per_mille);
-
-    if (error_tenths < 0) {
-        command_per_mille = (int16_t)-command_per_mille;
-    }
-
-    return command_per_mille;
-}
-
-static void poll_position_mode(uint32_t now_ms)
-{
-    int16_t error_tenths;
-
-    if (!feedback_is_fresh(now_ms)) {
-        drive_stop();
+    g_servo_controller.last_rate_update_ms = now_ms;
+    if (elapsed_ms == 0U) {
         return;
     }
 
-    error_tenths =
-        (int16_t)g_servo_controller.target_angle_tenths -
-        (int16_t)g_servo_controller.angle_tenths;
+    scaled_delta =
+        ((int64_t)g_servo_controller.rate_per_mille *
+         (int64_t)SERVO_MANUAL_RATE_FULL_SCALE_TENTHS_PER_SEC *
+         (int64_t)elapsed_ms) +
+        (int64_t)g_servo_controller.rate_delta_remainder;
+    delta_tenths = (int32_t)(scaled_delta / SERVO_RATE_DELTA_DENOMINATOR);
+    g_servo_controller.rate_delta_remainder =
+        (int32_t)(scaled_delta % SERVO_RATE_DELTA_DENOMINATOR);
 
-    if (abs(error_tenths) <= SERVO_POSITION_TOLERANCE_TENTHS) {
-        drive_stop();
-        g_servo_controller.mode = SERVO_MODE_STOPPED;
+    if (delta_tenths == 0) {
         return;
     }
 
-    drive_rate_per_mille(calculate_position_command(
-        error_tenths,
-        g_servo_controller.position_speed_limit_per_mille));
+    target_angle_tenths =
+        (int32_t)g_servo_controller.target_angle_tenths + delta_tenths;
+    if (target_angle_tenths > (int32_t)SERVO_MAX_ANGLE_TENTHS) {
+        target_angle_tenths = (int32_t)SERVO_MAX_ANGLE_TENTHS;
+        g_servo_controller.rate_delta_remainder = 0;
+    } else if (target_angle_tenths < (int32_t)SERVO_MIN_ANGLE_TENTHS) {
+        target_angle_tenths = (int32_t)SERVO_MIN_ANGLE_TENTHS;
+        g_servo_controller.rate_delta_remainder = 0;
+    }
+
+    g_servo_controller.target_angle_tenths = (uint16_t)target_angle_tenths;
 }
 
 static void poll_rate_mode(uint32_t now_ms)
 {
-    if (!feedback_is_fresh(now_ms)) {
-        drive_stop();
-        return;
-    }
-
-    if ((g_servo_controller.rate_per_mille > 0) &&
-        (g_servo_controller.angle_tenths >= SERVO_MAX_ANGLE_TENTHS)) {
-        drive_stop();
-        return;
-    }
-
-    if ((g_servo_controller.rate_per_mille < 0) &&
-        (g_servo_controller.angle_tenths <= SERVO_MIN_ANGLE_TENTHS)) {
-        drive_stop();
-        return;
-    }
-
-    drive_rate_per_mille(g_servo_controller.rate_per_mille);
+    update_rate_target(now_ms);
+    apply_target_pwm();
 }
 
 void servo_controller_init(void)
 {
-    g_servo_controller.angle_tenths = SERVO_HOME_ANGLE_TENTHS;
-    g_servo_controller.last_feedback_ms = 0U;
-    g_servo_controller.feedback_valid = false;
     g_servo_controller.target_angle_tenths = SERVO_HOME_ANGLE_TENTHS;
     g_servo_controller.rate_per_mille = 0;
     g_servo_controller.position_speed_limit_per_mille =
         SERVO_POSITION_HOME_SPEED_PER_MILLE;
-    g_servo_controller.pwm_us = SERVO_PWM_NEUTRAL_US;
+    g_servo_controller.rate_delta_remainder = 0;
+    g_servo_controller.last_rate_update_ms = HAL_GetTick();
+    g_servo_controller.pwm_us = angle_to_pwm_us(SERVO_HOME_ANGLE_TENTHS);
     g_servo_controller.mode = SERVO_MODE_POSITION;
 
-    set_pwm_us(SERVO_PWM_NEUTRAL_US);
+    apply_target_pwm();
     if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK) {
         Error_Handler();
     }
-
-    if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK) {
-        Error_Handler();
-    }
-
-    if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_2) != HAL_OK) {
-        Error_Handler();
-    }
-
-    servo_controller_home();
 }
 
 void servo_controller_poll(void)
@@ -236,7 +168,7 @@ void servo_controller_poll(void)
 
     switch (g_servo_controller.mode) {
     case SERVO_MODE_POSITION:
-        poll_position_mode(now_ms);
+        poll_position_mode();
         break;
 
     case SERVO_MODE_RATE:
@@ -245,7 +177,7 @@ void servo_controller_poll(void)
 
     case SERVO_MODE_STOPPED:
     default:
-        drive_stop();
+        apply_target_pwm();
         break;
     }
 }
@@ -257,32 +189,32 @@ void servo_controller_set_position(uint16_t angle_tenths)
 
 void servo_controller_set_rate(int16_t rate_per_mille)
 {
+    uint32_t now_ms = HAL_GetTick();
+
+    if (g_servo_controller.mode == SERVO_MODE_RATE) {
+        update_rate_target(now_ms);
+    }
+
     g_servo_controller.rate_per_mille =
         clamp_i16(rate_per_mille, -1000, 1000);
+    g_servo_controller.last_rate_update_ms = now_ms;
+    g_servo_controller.rate_delta_remainder = 0;
 
     if (g_servo_controller.rate_per_mille == 0) {
         servo_controller_stop();
         return;
     }
 
-    if (g_servo_controller.feedback_valid) {
-        g_servo_controller.target_angle_tenths =
-            g_servo_controller.angle_tenths;
-    }
-
     g_servo_controller.mode = SERVO_MODE_RATE;
+    apply_target_pwm();
 }
 
 void servo_controller_stop(void)
 {
-    if (g_servo_controller.feedback_valid) {
-        g_servo_controller.target_angle_tenths =
-            g_servo_controller.angle_tenths;
-    }
-
     g_servo_controller.rate_per_mille = 0;
+    g_servo_controller.rate_delta_remainder = 0;
     g_servo_controller.mode = SERVO_MODE_STOPPED;
-    drive_stop();
+    apply_target_pwm();
 }
 
 void servo_controller_home(void)
@@ -302,29 +234,4 @@ void servo_controller_get_settings(ServoControllerSettings *settings)
     settings->position_speed_limit_per_mille =
         g_servo_controller.position_speed_limit_per_mille;
     settings->pwm_us = g_servo_controller.pwm_us;
-}
-
-void servo_controller_on_feedback_capture(TIM_HandleTypeDef *htim)
-{
-    uint32_t period_us;
-    uint32_t high_us;
-
-    if ((htim->Instance != TIM2) ||
-        (htim->Channel != HAL_TIM_ACTIVE_CHANNEL_1)) {
-        return;
-    }
-
-    period_us = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-    high_us = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
-
-    if ((period_us < SERVO_FEEDBACK_MIN_PERIOD_US) ||
-        (period_us > SERVO_FEEDBACK_MAX_PERIOD_US) ||
-        (high_us > period_us)) {
-        return;
-    }
-
-    g_servo_controller.angle_tenths =
-        calculate_feedback_angle(period_us, high_us);
-    g_servo_controller.last_feedback_ms = HAL_GetTick();
-    g_servo_controller.feedback_valid = true;
 }

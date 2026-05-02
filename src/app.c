@@ -8,6 +8,12 @@
 #include "modules/servo_controller.h"
 
 #if DEBUG_LOG_ENABLED
+#define SERVO_STATUS_LOG_INTERVAL_MS 250U
+
+static ServoControllerSettings g_last_logged_servo_settings;
+static uint32_t g_last_servo_status_log_ms;
+static uint8_t g_servo_status_log_initialized;
+
 static void log_reset_message(void)
 {
     uint8_t pin_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) != 0U);
@@ -56,9 +62,31 @@ static const char *gc_packet_type_name(uint8_t type)
     }
 }
 
+static uint8_t servo_status_log_should_update(
+    const ServoControllerSettings *settings)
+{
+    return (g_servo_status_log_initialized == 0U) ||
+           (settings->target_angle_tenths !=
+            g_last_logged_servo_settings.target_angle_tenths) ||
+           (settings->rate_per_mille !=
+            g_last_logged_servo_settings.rate_per_mille) ||
+           (settings->position_speed_limit_per_mille !=
+            g_last_logged_servo_settings.position_speed_limit_per_mille);
+}
+
+static void remember_logged_servo_status(
+    const ServoControllerSettings *settings,
+    uint32_t now_ms)
+{
+    g_last_logged_servo_settings = *settings;
+    g_last_servo_status_log_ms = now_ms;
+    g_servo_status_log_initialized = 1U;
+}
+
 static void log_applied_gc_packet(const GcPacket *packet)
 {
     ServoControllerSettings settings;
+    uint32_t now_ms = HAL_GetTick();
 
     servo_controller_get_settings(&settings);
     LOG("[antenna_servo] gc applied: seq=%u gc_mode=%s servo_target=%u servo_rate=%d servo_speed_limit=%d servo_pwm=%uus\r\n",
@@ -68,10 +96,36 @@ static void log_applied_gc_packet(const GcPacket *packet)
         (int)settings.rate_per_mille,
         (int)settings.position_speed_limit_per_mille,
         (unsigned int)settings.pwm_us);
+    remember_logged_servo_status(&settings, now_ms);
+}
+
+static void log_servo_status_if_changed(void)
+{
+    ServoControllerSettings settings;
+    uint32_t now_ms = HAL_GetTick();
+
+    servo_controller_get_settings(&settings);
+    if (!servo_status_log_should_update(&settings)) {
+        return;
+    }
+
+    if ((g_servo_status_log_initialized != 0U) &&
+        ((now_ms - g_last_servo_status_log_ms) <
+         SERVO_STATUS_LOG_INTERVAL_MS)) {
+        return;
+    }
+
+    LOG("[antenna_servo] servo update: servo_target=%u servo_rate=%d servo_speed_limit=%d servo_pwm=%uus\r\n",
+        (unsigned int)settings.target_angle_tenths,
+        (int)settings.rate_per_mille,
+        (int)settings.position_speed_limit_per_mille,
+        (unsigned int)settings.pwm_us);
+    remember_logged_servo_status(&settings, now_ms);
 }
 #else
 #define log_reset_message() do { } while (0)
 #define log_applied_gc_packet(packet) do { } while (0)
+#define log_servo_status_if_changed() do { } while (0)
 #endif
 
 void init(void)
@@ -126,6 +180,7 @@ void poll(void)
     }
 
     servo_controller_poll();
+    log_servo_status_if_changed();
     rssi_monitor_poll();
     board_led_poll();
 }
@@ -143,5 +198,4 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
     rssi_monitor_on_capture(htim);
-    servo_controller_on_feedback_capture(htim);
 }
