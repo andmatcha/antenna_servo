@@ -10,8 +10,8 @@
 /* Operational range is limited to 180 degrees on the 270-degree servo. */
 #define SERVO_MAX_ANGLE_TENTHS                   1800
 
-#define SERVO_PWM_MIN_US                         1000U
-#define SERVO_PWM_MAX_US                         3000U
+#define SERVO_PWM_MIN_US                         500U
+#define SERVO_PWM_MAX_US                         2500U
 #define SERVO_PHYSICAL_RANGE_TENTHS              2700
 
 #define SERVO_POSITION_SPEED_LIMIT_PER_MILLE        1000
