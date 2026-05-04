@@ -6,16 +6,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define RSSI_LOG_INTERVAL_MS          1000U
-#define RSSI_STALE_TIMEOUT_MS         1500U
-#define RSSI_MIN_PERIOD_US            100U
-#define RSSI_MAX_PERIOD_US            12000U
-#define RSSI_XR_MIN_PERIOD_US         800U
-#define RSSI_XR_MAX_PERIOD_US         1200U
-#define RSSI_900HP_MIN_PERIOD_US      7000U
-#define RSSI_900HP_MAX_PERIOD_US      9500U
-#define RSSI_900HP_ZERO_DB_PER_MILLE  325U
-#define RSSI_900HP_PER_MILLE_PER_DB   15U
+#define RSSI_LOG_INTERVAL_MS              1000U
+#define RSSI_XR_PWM_PERIOD_US             1000U
+#define RSSI_XR_PWM_PERIOD_TOLERANCE_US   200U
+#define RSSI_XR_PWM_TIMER_DEFAULT_MS      4000U
+#define RSSI_STALE_TIMEOUT_MS             \
+    (RSSI_XR_PWM_TIMER_DEFAULT_MS + 500U)
+#define RSSI_XR_MIN_PERIOD_US             \
+    (RSSI_XR_PWM_PERIOD_US - RSSI_XR_PWM_PERIOD_TOLERANCE_US)
+#define RSSI_XR_MAX_PERIOD_US             \
+    (RSSI_XR_PWM_PERIOD_US + RSSI_XR_PWM_PERIOD_TOLERANCE_US)
 
 typedef struct
 {
@@ -30,7 +30,6 @@ static RssiMonitorContext g_rssi_monitor;
 
 extern TIM_HandleTypeDef htim2;
 
-#if DEBUG_LOG_ENABLED
 typedef struct
 {
     uint32_t period_us;
@@ -39,7 +38,6 @@ typedef struct
     uint32_t capture_count;
     bool valid;
 } RssiSnapshot;
-#endif
 
 static uint32_t enter_critical_section(void)
 {
@@ -55,13 +53,6 @@ static void exit_critical_section(uint32_t primask)
     }
 }
 
-static bool period_is_in_range(uint32_t period_us)
-{
-    return (period_us >= RSSI_MIN_PERIOD_US) &&
-           (period_us <= RSSI_MAX_PERIOD_US);
-}
-
-#if DEBUG_LOG_ENABLED
 static uint32_t calculate_duty_per_mille(uint32_t period_us, uint32_t high_us)
 {
     if (period_us == 0U) {
@@ -77,26 +68,9 @@ static bool period_matches_xbee_xr(uint32_t period_us)
            (period_us <= RSSI_XR_MAX_PERIOD_US);
 }
 
-static bool period_matches_xbee_900hp(uint32_t period_us)
-{
-    return (period_us >= RSSI_900HP_MIN_PERIOD_US) &&
-           (period_us <= RSSI_900HP_MAX_PERIOD_US);
-}
-
-static int32_t estimate_xbee_xr_dbm(uint32_t duty_per_mille)
+static int32_t convert_xbee_xr_pwm_to_dbm(uint32_t duty_per_mille)
 {
     return -((int32_t)((duty_per_mille + 5U) / 10U));
-}
-
-static uint32_t estimate_xbee_900hp_margin_db(uint32_t duty_per_mille)
-{
-    if (duty_per_mille <= RSSI_900HP_ZERO_DB_PER_MILLE) {
-        return 0U;
-    }
-
-    return (duty_per_mille - RSSI_900HP_ZERO_DB_PER_MILLE +
-            (RSSI_900HP_PER_MILLE_PER_DB / 2U)) /
-           RSSI_900HP_PER_MILLE_PER_DB;
 }
 
 static RssiSnapshot take_snapshot(void)
@@ -113,7 +87,6 @@ static RssiSnapshot take_snapshot(void)
     exit_critical_section(primask);
     return snapshot;
 }
-#endif
 
 static void start_input_capture_if_ready(uint32_t channel)
 {
@@ -169,30 +142,13 @@ void rssi_monitor_poll(void)
     duty_per_mille =
         calculate_duty_per_mille(snapshot.period_us, snapshot.high_us);
 
-    if (period_matches_xbee_xr(snapshot.period_us)) {
-        LOG("[antenna_servo] rssi: period=%luus high=%luus duty=%lu.%lu%% xr_est=%lddBm age=%lums\r\n",
-            (unsigned long)snapshot.period_us,
-            (unsigned long)snapshot.high_us,
-            (unsigned long)(duty_per_mille / 10U),
-            (unsigned long)(duty_per_mille % 10U),
-            (long)estimate_xbee_xr_dbm(duty_per_mille),
-            (unsigned long)age_ms);
-    } else if (period_matches_xbee_900hp(snapshot.period_us)) {
-        LOG("[antenna_servo] rssi: period=%luus high=%luus duty=%lu.%lu%% 900hp_margin=%ludB age=%lums\r\n",
-            (unsigned long)snapshot.period_us,
-            (unsigned long)snapshot.high_us,
-            (unsigned long)(duty_per_mille / 10U),
-            (unsigned long)(duty_per_mille % 10U),
-            (unsigned long)estimate_xbee_900hp_margin_db(duty_per_mille),
-            (unsigned long)age_ms);
-    } else {
-        LOG("[antenna_servo] rssi: period=%luus high=%luus duty=%lu.%lu%% age=%lums\r\n",
-            (unsigned long)snapshot.period_us,
-            (unsigned long)snapshot.high_us,
-            (unsigned long)(duty_per_mille / 10U),
-            (unsigned long)(duty_per_mille % 10U),
-            (unsigned long)age_ms);
-    }
+    LOG("[antenna_servo] rssi: period=%luus high=%luus duty=%lu.%lu%% xr=%lddBm age=%lums\r\n",
+        (unsigned long)snapshot.period_us,
+        (unsigned long)snapshot.high_us,
+        (unsigned long)(duty_per_mille / 10U),
+        (unsigned long)(duty_per_mille % 10U),
+        (long)convert_xbee_xr_pwm_to_dbm(duty_per_mille),
+        (unsigned long)age_ms);
 #endif
 }
 
@@ -209,7 +165,7 @@ void rssi_monitor_on_capture(TIM_HandleTypeDef *htim)
     period_us = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
     high_us = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
 
-    if (!period_is_in_range(period_us) || (high_us > period_us)) {
+    if (!period_matches_xbee_xr(period_us) || (high_us > period_us)) {
         return;
     }
 
@@ -218,4 +174,30 @@ void rssi_monitor_on_capture(TIM_HandleTypeDef *htim)
     g_rssi_monitor.last_capture_ms = HAL_GetTick();
     g_rssi_monitor.capture_count++;
     g_rssi_monitor.valid = true;
+}
+
+bool rssi_monitor_get_reading(RssiMonitorReading *reading)
+{
+    RssiSnapshot snapshot;
+    uint32_t now_ms;
+
+    if (reading == NULL) {
+        return false;
+    }
+
+    snapshot = take_snapshot();
+    now_ms = HAL_GetTick();
+
+    reading->age_ms = now_ms - snapshot.last_capture_ms;
+    reading->duty_per_mille =
+        calculate_duty_per_mille(snapshot.period_us, snapshot.high_us);
+    reading->fresh =
+        snapshot.valid &&
+        period_matches_xbee_xr(snapshot.period_us) &&
+        (reading->age_ms <= RSSI_STALE_TIMEOUT_MS);
+    reading->value = reading->fresh
+        ? convert_xbee_xr_pwm_to_dbm(reading->duty_per_mille)
+        : 0;
+
+    return reading->fresh;
 }

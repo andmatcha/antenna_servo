@@ -7,6 +7,17 @@
 #include "modules/rssi_monitor.h"
 #include "modules/servo_controller.h"
 
+#include <stdio.h>
+
+#define GF_STATUS_INTERVAL_MS 200U
+#define GF_STATUS_UART huart1
+#define GF_STATUS_UART_TIMEOUT_MS 10U
+#define GF_STATUS_INVALID_RSSI (-999L)
+
+extern UART_HandleTypeDef GF_STATUS_UART;
+
+static uint32_t g_last_gf_status_tx_ms;
+
 #if DEBUG_LOG_ENABLED
 #define SERVO_STATUS_LOG_INTERVAL_MS 250U
 
@@ -128,6 +139,40 @@ static void log_servo_status_if_changed(void)
 #define log_servo_status_if_changed() do { } while (0)
 #endif
 
+static void send_gf_status_if_due(void)
+{
+    ServoControllerSettings servo_settings;
+    RssiMonitorReading rssi_reading;
+    uint32_t now_ms = HAL_GetTick();
+    long rssi_value = GF_STATUS_INVALID_RSSI;
+    char line[48];
+    int line_len;
+
+    if ((now_ms - g_last_gf_status_tx_ms) < GF_STATUS_INTERVAL_MS) {
+        return;
+    }
+    g_last_gf_status_tx_ms = now_ms;
+
+    servo_controller_get_settings(&servo_settings);
+    if (rssi_monitor_get_reading(&rssi_reading)) {
+        rssi_value = (long)rssi_reading.value;
+    }
+
+    line_len = snprintf(line,
+                        sizeof(line),
+                        "GF:SERVO=%u,RSSI=%ld\r\n",
+                        (unsigned int)servo_settings.target_angle_tenths,
+                        rssi_value);
+    if ((line_len <= 0) || ((size_t)line_len >= sizeof(line))) {
+        return;
+    }
+
+    (void)HAL_UART_Transmit(&GF_STATUS_UART,
+                            (uint8_t *)line,
+                            (uint16_t)line_len,
+                            GF_STATUS_UART_TIMEOUT_MS);
+}
+
 void init(void)
 {
     log_reset_message();
@@ -182,6 +227,7 @@ void poll(void)
     servo_controller_poll();
     log_servo_status_if_changed();
     rssi_monitor_poll();
+    send_gf_status_if_due();
     board_led_poll();
 }
 
