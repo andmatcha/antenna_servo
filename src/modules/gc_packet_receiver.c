@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-#define GC_PACKET_UART huart2
+#define GC_PACKET_UART huart1
 #define GC_PACKET_LEN 9U
 #define GC_PACKET_QUEUE_DEPTH 4U
 #define GC_PACKET_HEADER_0 'G'
